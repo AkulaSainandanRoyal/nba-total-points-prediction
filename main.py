@@ -1,195 +1,605 @@
 import os
+import joblib
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 
-from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
 
 DATA_URL = "https://huggingface.co/datasets/davdsdfd/nba-games/resolve/main/games.csv"
 DATA_PATH = "data/games.csv"
 
 
 def load_data():
+    os.makedirs("data", exist_ok=True)
+
     if not os.path.exists(DATA_PATH):
-        print("Downloading NBA game data...")
+        print("Downloading NBA dataset...")
         df = pd.read_csv(DATA_URL)
         df.to_csv(DATA_PATH, index=False)
     else:
-        df = pd.read_csv(DATA_PATH)
+        print("Loading existing NBA dataset...")
 
-    df["GAME_DATE_EST"] = pd.to_datetime(df["GAME_DATE_EST"])
-    df = df.sort_values("GAME_DATE_EST").reset_index(drop=True)
-
-    # Keep only completed games with the fields needed for this simple project.
-    needed = [
-        "GAME_DATE_EST", "GAME_ID", "TEAM_ID_home", "TEAM_ID_away",
-        "PTS_home", "PTS_away"
-    ]
-    df = df[needed].dropna().copy()
-    return df
+    return pd.read_csv(DATA_PATH)
 
 
-def add_pregame_features(df, window=3):
-    """
-    For each game, use only information from games that happened BEFORE it.
-    We calculate each team's average points scored and conceded in its last
-    `window` games.
-    """
-    history = {}
-    rows = []
+def prepare_data(df):
 
-    for _, game in df.iterrows():
-        home = int(game["TEAM_ID_home"])
-        away = int(game["TEAM_ID_away"])
+    # Select the required columns
+    df = df[
+        [
+            "GAME_DATE_EST",
+            "TEAM_ID_home",
+            "TEAM_ID_away",
+            "PTS_home",
+            "PTS_away",
+        ]
+    ].copy()
 
-        home_hist = history.get(home, [])
-        away_hist = history.get(away, [])
+    # Remove games with missing values
+    df = df.dropna(
+        subset=[
+            "GAME_DATE_EST",
+            "TEAM_ID_home",
+            "TEAM_ID_away",
+            "PTS_home",
+            "PTS_away",
+        ]
+    )
 
-        if len(home_hist) >= window and len(away_hist) >= window:
-            home_recent = home_hist[-window:]
-            away_recent = away_hist[-window:]
+    # Convert date to datetime
+    df["GAME_DATE_EST"] = pd.to_datetime(
+        df["GAME_DATE_EST"]
+    )
 
-            rows.append({
-                "date": game["GAME_DATE_EST"],
-                "game_id": int(game["GAME_ID"]),
-                "home_team": home,
-                "away_team": away,
-                "home_avg_scored": np.mean([x["scored"] for x in home_recent]),
-                "home_avg_allowed": np.mean([x["allowed"] for x in home_recent]),
-                "away_avg_scored": np.mean([x["scored"] for x in away_recent]),
-                "away_avg_allowed": np.mean([x["allowed"] for x in away_recent]),
-                "target_total_points": float(game["PTS_home"] + game["PTS_away"])
-            })
+    # Sort games chronologically
+    df = df.sort_values(
+        "GAME_DATE_EST"
+    ).reset_index(drop=True)
 
-        # IMPORTANT: update history only after creating the features.
-        history.setdefault(home, []).append({
-            "scored": float(game["PTS_home"]),
-            "allowed": float(game["PTS_away"])
-        })
-        history.setdefault(away, []).append({
-            "scored": float(game["PTS_away"]),
-            "allowed": float(game["PTS_home"])
-        })
+    # Total points scored in each game
+    df["total_points"] = (
+        df["PTS_home"] + df["PTS_away"]
+    )
 
-    return pd.DataFrame(rows)
+    # Store previous games for every team
+    team_history = {}
 
+    features = []
+    targets = []
 
-def evaluate_model(name, model, X_train, y_train, X_test, y_test):
-    model.fit(X_train, y_train)
-    pred = model.predict(X_test)
+    for _, row in df.iterrows():
 
-    mae = mean_absolute_error(y_test, pred)
-    rmse = np.sqrt(mean_squared_error(y_test, pred))
-    r2 = r2_score(y_test, pred)
+        home_team = row["TEAM_ID_home"]
+        away_team = row["TEAM_ID_away"]
 
-    return {
+        # Previous games for both teams
+        home_history = team_history.get(
+            home_team,
+            []
+        )
+
+        away_history = team_history.get(
+            away_team,
+            []
+        )
+
+        # Need at least 3 previous games
+        # for both teams
+        if (
+            len(home_history) >= 3
+            and len(away_history) >= 3
+        ):
+
+            home_last3 = home_history[-3:]
+            away_last3 = away_history[-3:]
+
+            # Home team's average points scored
+            home_scored = np.mean(
+                [
+                    game["scored"]
+                    for game in home_last3
+                ]
+            )
+
+            # Home team's average points allowed
+            home_allowed = np.mean(
+                [
+                    game["allowed"]
+                    for game in home_last3
+                ]
+            )
+
+            # Away team's average points scored
+            away_scored = np.mean(
+                [
+                    game["scored"]
+                    for game in away_last3
+                ]
+            )
+
+            # Away team's average points allowed
+            away_allowed = np.mean(
+                [
+                    game["allowed"]
+                    for game in away_last3
+                ]
+            )
+
+            features.append(
+                [
+                    home_scored,
+                    home_allowed,
+                    away_scored,
+                    away_allowed,
+                ]
+            )
+
+            targets.append(
+                row["total_points"]
+            )
+
+        # Update home team's history
+        team_history.setdefault(
+            home_team,
+            []
+        ).append(
+            {
+                "scored": row["PTS_home"],
+                "allowed": row["PTS_away"],
+            }
+        )
+
+        # Update away team's history
+        team_history.setdefault(
+            away_team,
+            []
+        ).append(
+            {
+                "scored": row["PTS_away"],
+                "allowed": row["PTS_home"],
+            }
+        )
+
+    # Create feature DataFrame
+    X = pd.DataFrame(
+        features,
+        columns=[
+            "home_avg_scored",
+            "home_avg_allowed",
+            "away_avg_scored",
+            "away_avg_allowed",
+        ],
+    )
+
+    # Target variable
+    y = pd.Series(
+        targets,
+        name="total_points"
+    )
+
+    # Final safety check
+    valid_rows = X.notna().all(axis=1)
+
+    X = X.loc[valid_rows].reset_index(drop=True)
+    y = y.loc[valid_rows].reset_index(drop=True)
+
+    return X, y
+
+def evaluate_model(
+    name,
+    model,
+    X_train,
+    y_train,
+    X_test,
+    y_test,
+):
+
+    # Train model
+    model.fit(
+        X_train,
+        y_train
+    )
+
+    # Make predictions
+    predictions = model.predict(
+        X_test
+    )
+
+    # Calculate metrics
+    mae = mean_absolute_error(
+        y_test,
+        predictions
+    )
+
+    rmse = np.sqrt(
+        mean_squared_error(
+            y_test,
+            predictions
+        )
+    )
+
+    r2 = r2_score(
+        y_test,
+        predictions
+    )
+
+    result = {
         "Model": name,
-        "MAE": round(mae, 2),
-        "RMSE": round(rmse, 2),
-        "R2": round(r2, 3),
-    }, model, pred
+        "MAE": mae,
+        "RMSE": rmse,
+        "R2": r2,
+    }
+
+    return (
+        result,
+        model,
+        predictions
+    )
 
 
 def main():
-    os.makedirs("results", exist_ok=True)
 
-    games = load_data()
-    data = add_pregame_features(games, window=3)
+    print(
+        "\n🏀 NBA TOTAL POINTS PREDICTION"
+    )
+    print(
+        "==============================\n"
+    )
 
-    if len(data) < 100:
-        raise ValueError("Not enough usable games after feature engineering.")
+    # -----------------------------------------
+    # 1. Load dataset
+    # -----------------------------------------
 
-    # Chronological split: older games for training, newest 20% for testing.
-    split = int(len(data) * 0.80)
-    train = data.iloc[:split]
-    test = data.iloc[split:]
+    df = load_data()
 
-    features = [
-        "home_avg_scored",
-        "home_avg_allowed",
-        "away_avg_scored",
-        "away_avg_allowed",
+    print(
+        f"Total games in dataset: {len(df)}"
+    )
+
+    # -----------------------------------------
+    # 2. Prepare data
+    # -----------------------------------------
+
+    X, y = prepare_data(df)
+
+    print(
+        f"Games usable for ML: {len(X)}"
+    )
+
+    # -----------------------------------------
+    # 3. Chronological train-test split
+    # -----------------------------------------
+
+    split_index = int(
+        len(X) * 0.8
+    )
+
+    X_train = X.iloc[
+        :split_index
     ]
 
-    X_train = train[features]
-    y_train = train["target_total_points"]
-    X_test = test[features]
-    y_test = test["target_total_points"]
+    X_test = X.iloc[
+        split_index:
+    ]
+
+    y_train = y.iloc[
+        :split_index
+    ]
+
+    y_test = y.iloc[
+        split_index:
+    ]
+
+    print(
+        f"Training games: {len(X_train)}"
+    )
+
+    print(
+        f"Testing games: {len(X_test)}"
+    )
+
+    # -----------------------------------------
+    # 4. Define models
+    # -----------------------------------------
 
     models = [
-        ("Linear Regression", LinearRegression()),
+        (
+            "Linear Regression",
+            LinearRegression()
+        ),
         (
             "Random Forest",
             RandomForestRegressor(
-                n_estimators=200,
+                n_estimators=100,
                 random_state=42,
-                max_depth=10,
-                n_jobs=-1,
-            ),
-        ),
+                n_jobs=-1
+            )
+        )
     ]
 
+    # -----------------------------------------
+    # 5. Train and evaluate models
+    # -----------------------------------------
+
     results = []
-    predictions = test[["date", "game_id", "home_team", "away_team", "target_total_points"]].copy()
+    predictions = {}
+    fitted_models = {}
 
     for name, model in models:
-        result, fitted_model, pred = evaluate_model(
-            name, model, X_train, y_train, X_test, y_test
+
+        result, fitted_model, pred = (
+            evaluate_model(
+                name,
+                model,
+                X_train,
+                y_train,
+                X_test,
+                y_test
+            )
         )
+
         results.append(result)
-        predictions[name.replace(" ", "_") + "_prediction"] = pred
 
-    results_df = pd.DataFrame(results)
-    results_df.to_csv("results/model_results.csv", index=False)
-    predictions.to_csv("results/predictions.csv", index=False)
+        fitted_models[name] = (
+            fitted_model
+        )
 
-    # Plot model comparison.
-    plt.figure(figsize=(8, 5))
-    plt.bar(results_df["Model"], results_df["RMSE"])
-    plt.ylabel("RMSE (lower is better)")
-    plt.title("NBA Total Points Prediction - Model Comparison")
+        predictions[
+            name.replace(
+                " ",
+                "_"
+            ) + "_prediction"
+        ] = pred
+
+    # -----------------------------------------
+    # 6. Save Linear Regression model
+    # -----------------------------------------
+
+    os.makedirs(
+        "models",
+        exist_ok=True
+    )
+
+    joblib.dump(
+        fitted_models[
+            "Linear Regression"
+        ],
+        "models/linear_regression.pkl"
+    )
+
+    print(
+        "\nSaved trained model:"
+    )
+
+    print(
+        "models/linear_regression.pkl"
+    )
+
+    # -----------------------------------------
+    # 7. Save model results
+    # -----------------------------------------
+
+    os.makedirs(
+        "results",
+        exist_ok=True
+    )
+
+    results_df = pd.DataFrame(
+        results
+    )
+
+    results_df.to_csv(
+        "results/model_results.csv",
+        index=False
+    )
+
+    # -----------------------------------------
+    # 8. Save predictions
+    # -----------------------------------------
+
+    prediction_df = pd.DataFrame(
+        {
+            "Actual_Total_Points":
+                y_test.values,
+            **predictions
+        }
+    )
+
+    prediction_df.to_csv(
+        "results/predictions.csv",
+        index=False
+    )
+
+    # -----------------------------------------
+    # 9. Model comparison graph
+    # -----------------------------------------
+
+    plt.figure(
+        figsize=(8, 5)
+    )
+
+    plt.bar(
+        results_df["Model"],
+        results_df["RMSE"]
+    )
+
+    plt.xlabel("Model")
+    plt.ylabel("RMSE")
+
+    plt.title(
+        "Model Comparison - RMSE"
+    )
+
     plt.tight_layout()
-    plt.savefig("results/model_comparison.png", dpi=150)
+
+    plt.savefig(
+        "results/model_comparison.png"
+    )
+
     plt.close()
 
-    # Plot actual vs Random Forest prediction.
-    rf_pred = predictions["Random_Forest_prediction"]
+    # -----------------------------------------
+    # 10. Actual vs Predicted graph
+    # -----------------------------------------
 
-    plt.figure(figsize=(7, 6))
-    plt.scatter(y_test, rf_pred, alpha=0.45)
-    min_v = min(y_test.min(), rf_pred.min())
-    max_v = max(y_test.max(), rf_pred.max())
-    plt.plot([min_v, max_v], [min_v, max_v], linestyle="--")
-    plt.xlabel("Actual Total Points")
-    plt.ylabel("Predicted Total Points")
-    plt.title("Random Forest: Actual vs Predicted")
+    best_model_name = (
+        results_df.loc[
+            results_df["RMSE"].idxmin(),
+            "Model"
+        ]
+    )
+
+    best_prediction_column = (
+        best_model_name.replace(
+            " ",
+            "_"
+        )
+        + "_prediction"
+    )
+
+    best_predictions = predictions[
+        best_prediction_column
+    ]
+
+    plt.figure(
+        figsize=(7, 7)
+    )
+
+    plt.scatter(
+        y_test,
+        best_predictions,
+        alpha=0.3
+    )
+
+    min_value = min(
+        y_test.min(),
+        best_predictions.min()
+    )
+
+    max_value = max(
+        y_test.max(),
+        best_predictions.max()
+    )
+
+    plt.plot(
+        [min_value, max_value],
+        [min_value, max_value]
+    )
+
+    plt.xlabel(
+        "Actual Total Points"
+    )
+
+    plt.ylabel(
+        "Predicted Total Points"
+    )
+
+    plt.title(
+        f"Actual vs Predicted - "
+        f"{best_model_name}"
+    )
+
     plt.tight_layout()
-    plt.savefig("results/actual_vs_predicted.png", dpi=150)
+
+    plt.savefig(
+        "results/actual_vs_predicted.png"
+    )
+
     plt.close()
 
-    # Save a small summary text file.
-    best = results_df.sort_values("RMSE").iloc[0]
-    with open("results/summary.txt", "w", encoding="utf-8") as f:
-        f.write("NBA TOTAL POINTS PREDICTION\n")
-        f.write("===========================\n\n")
-        f.write(f"Games used: {len(data)}\n")
-        f.write(f"Training games: {len(train)}\n")
-        f.write(f"Testing games: {len(test)}\n\n")
-        f.write("Model results:\n")
-        f.write(results_df.to_string(index=False))
-        f.write("\n\nBest model by RMSE: ")
-        f.write(f"{best['Model']} (RMSE = {best['RMSE']})\n")
+    # -----------------------------------------
+    # 11. Save summary
+    # -----------------------------------------
 
-    print("\nProject completed successfully!")
-    print(results_df.to_string(index=False))
-    print("\nFiles created inside results/:")
-    print("- model_results.csv")
-    print("- predictions.csv")
-    print("- model_comparison.png")
-    print("- actual_vs_predicted.png")
-    print("- summary.txt")
+    with open(
+        "results/summary.txt",
+        "w"
+    ) as file:
+
+        file.write(
+            "NBA Total Points Prediction\n"
+        )
+
+        file.write(
+            "============================\n\n"
+        )
+
+        file.write(
+            f"Games used: {len(X)}\n"
+        )
+
+        file.write(
+            f"Training games: "
+            f"{len(X_train)}\n"
+        )
+
+        file.write(
+            f"Testing games: "
+            f"{len(X_test)}\n\n"
+        )
+
+        file.write(
+            results_df.to_string(
+                index=False
+            )
+        )
+
+        file.write(
+            f"\n\nBest model by RMSE: "
+            f"{best_model_name}\n"
+        )
+
+    # -----------------------------------------
+    # 12. Display results
+    # -----------------------------------------
+
+    print("\nMODEL RESULTS")
+    print("=============")
+
+    print(
+        results_df.to_string(
+            index=False
+        )
+    )
+
+    print(
+        f"\nBest model by RMSE: "
+        f"{best_model_name}"
+    )
+
+    print("\nFiles created:")
+
+    print(
+        "  results/model_results.csv"
+    )
+
+    print(
+        "  results/predictions.csv"
+    )
+
+    print(
+        "  results/model_comparison.png"
+    )
+
+    print(
+        "  results/actual_vs_predicted.png"
+    )
+
+    print(
+        "  results/summary.txt"
+    )
+
+    print(
+        "  models/linear_regression.pkl"
+    )
+
+    print(
+        "\n✅ Project completed successfully!"
+    )
 
 
 if __name__ == "__main__":

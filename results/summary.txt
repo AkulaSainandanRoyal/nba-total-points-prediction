@@ -1,13 +1,12 @@
-NBA TOTAL POINTS PREDICTION
-===========================
+NBA Total Points Prediction
+============================
 
 Games used: 29604
 Training games: 23683
 Testing games: 5921
 
-Model results:
-            Model   MAE  RMSE    R2
-Linear Regression 15.61 19.71 0.042
-    Random Forest 15.81 19.95 0.018
+            Model       MAE      RMSE        R2
+Linear Regression 15.614231 19.706389  0.041912
+    Random Forest 16.326259 20.559487 -0.042835
 
-Best model by RMSE: Linear Regression (RMSE = 19.71)
+Best model by RMSE: Linear Regression
